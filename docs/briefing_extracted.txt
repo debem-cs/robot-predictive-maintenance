@@ -1,0 +1,1458 @@
+Robot Predictive Maintenance  Season 2026
+Project Brieng for LLM-Assisted Development
+Compiled from the Kaggle competition pages and the data package supplied to participants
+Document compiled 2026-05-28
+Contents
+1 Document purpose 2
+2 Competition snapshot 2
+3 The physical system 2
+4 F ailure mode 3
+5 T ask denition 3
+6 Dataset description 3
+6.1 Top-level layout . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+6.2 Per-motor CSV schema . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+6.3Test conditions.xlsx(training) . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+6.4Test conditions.xlsx(testing) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+6.5 Submission le:sample_submission.csv. . . . . . . . . . . . . . . . . . . . . . . . 6
+7 Evaluation 6
+8 Provided helper module:utility.py8
+8.1 Sequence as the unit of data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+8.2 Wide dataframe layout . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+8.3 Sliding-window features . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+8.4 Regression-residual fault detector . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+8.5 Demo in__main__. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+9 F ailure-injection routine (best-eort transcription) 10
+10 Submission checklist 11
+Appendix A F unction-by-function API reference forutility.py11
+Appendix B File tree of the supplied data package 13
+Appendix C Glossary 14
+Appendix D F ull source ofutility.py14
+1
+
+1 Document purpose
+This document is a self-contained brieng pack for the Kaggle competitionRobot predictive mainte-
+nance  Season 2026. It is intended to be fed to a large language model that will help the author
+build a solution. It consolidates, in one place:
+the competition's stated overview, rules and evaluation;
+the description of the physical system and the failure mode;
+the exact structure of the provided dataset (training and testing);
+the format of the submission le;
+the full source of the providedutility.pyhelper module;
+a best-eort transcription of the failure-injection routine that synthesises the labels in the training
+data.
+The document is descriptive: it does not recommend a modelling approach. It is written so that an
+LLM reading only this le can answer questions about the problem, the data layout and the helper
+API without needing access to the original Kaggle pages.
+Source material:
+Kaggle competition pages (Overview, Description, Evaluation, Data, Citation), captured 2026-
+05-28.
+Files supplied in the downloadrobot-predictive-maintenance-season-2026/:utility.py,
+sample_submission.csv,training_data/,testing_data/.
+2 Competition snapshot
+Title Robot predictive maintenance  Season 2026
+Platform Kaggle (Community Prediction Competition)
+Host Zhiguo Zeng
+Organising body Chair Risk and Resilience of Complex Systems
+Funding ack. French research support; contractANR-22-CE-10-0004-OT1
+License CC BY-NC-SA 4.0
+Data package 190 les, 9.92 MB (CSV, XLSX, PY)
+Entrants 60 (at time of capture)
+Citation Zhiguo Zeng.Robot predictive maintenance  Sea-
+son 2026.https://kaggle.com/competitions/
+robot-predictive-maintenance-season-2026, 2026. Kaggle.
+3 The physical system
+The competition is based on an educational robot ArmPi FPV from Hiwonder. The robot has the
+following characteristics:
+Six degrees of freedom, driven by six serial-bus servo motors.
+2
+
+Controlled by a Raspberry Pi single-board computer and a Roli Metallic controller.
+Each servo motor reports itsposition,temperatureandvoltagewhen polled.
+A condition-monitoring program is developed on the Raspberry Pi and communicates with MATLAB
+to poll the position, temperature and voltage of all six motors in real time. The nominal sampling
+period is approximately0.1 s(i.e.∼10 Hz). Acquisitions used in the dataset last on the order of
+30 s up to several minutes per test sequence.
+4 Failure mode
+The fault studied in the competition is anabnormal temperature rise on a motor. Per the
+competition description, this failure mode can occur for many reasons in practice and is hard to
+predict from raw signals alone.
+In the dataset, failures aresimulated synthetically: a non-linear temperature rise is injected into
+the temperature channel of the aected motor(s) over a contiguous span of the sequence, and the
+correspondinglabelcolumn is set to1over that span. Outside the injected span, the signal is
+unchanged and the label is0.
+The injection routine itself is shown in Section 9. Two consequences for modelling that follow directly
+from the synthetic nature of the labels:
+The fault signature is whatever shape the injection function produces; it is not in-the-wild fault
+data.
+Outside the injected span, the aected motor's temperature channel is identical to a healthy run;
+the discriminative signal is concentrated inside the injected span.
+5 Task denition
+The objective is to predict the health state of each of the six motors at each time step of each test
+sequence:
+0 working normally;
+1 abnormal temperature rise.
+This yieldssix independent binary classication problems(one per motor), evaluated jointly
+via the mean of their F1 scores (Section 7).
+6 Dataset description
+6.1 Top-level layout
+The data package supplied to participants has the following top-level layout:
+robot-predictive-maintenance-season-2026/
+utility.py
+sample_submission.csv
+3
+
+training_data/
+training_data/
+Test conditions.xlsx
+<test_id_1>/
+data_motor_1.csv
+data_motor_2.csv
+data_motor_3.csv
+data_motor_4.csv
+data_motor_5.csv
+data_motor_6.csv
+<test_id_2>/
+...
+testing_data/
+testing_data/
+Test conditions.xlsx
+<test_id>/
+data_motor_1.csv
+...
+Each test_id is an underscore-separated timestamp of the formYYYYMMDD_xxxxxx. Inside each
+test-id folder, six CSV les contain the time series of the six motors collected during that test.
+6.2 Per-motor CSV schema
+Everydata_motor_k.csvle has the same ve columns:
+timeWall-clock timestamp in seconds (large absolute values; eectively a
+counter  see note below).
+positionServo position reported by the motor (integer units).
+temperatureMotor temperature (integer, ◦C).
+voltageMotor supply voltage (integer, mV-scale).
+labelGround-truth label:0= normal,1= abnormal temperature rise.
+(Present in training data; intentionally not provided for testing data.)
+Note on the time column.Thetimevalues are large absolute seconds. The helper function
+read_all_csvs_one_testsubtracts the rst row to obtain a relative time, and falls back to a
+synthetic sequence0,0.1,0.2, . . .if subtraction fails. A sample of the raw values from one of the
+training motor CSVs:
+time,position,temperature,voltage,label
+76522.025432825,86,42,7223,0
+76522.125464200,86,42,7214,0
+76522.225431919,86,42,7137,0
+76522.325432062,86,42,7135,0
+...
+6.3Test conditions.xlsx(training)
+The training-side spreadsheet lists the 23 training sequences and, for each one, the textual description
+of the test and a per-motor failure ag (NaN if no failure was injected on that motor,1.0if a failure
+was injected). Table 1 reproduces the contents.
+4
+
+Table 1: Training sequences  contents ofTest
+conditions.xlsx. Failed motors lists the motors for which
+the correspondingMotor_k_failurecell is1.0;  means no
+failure ag was set.
+Test id Description Failed motors
+20240105_164214 Not moving 
+20240105_165300 Pick up and place 
+20240105_165972 Not moving 
+20240320_152031 Not moving 
+20240320_153841 Move motor 6→motor 1 sequentially 
+20240320_155664 Not moving 
+20240321_122650 Pick up and place 
+20240325_135213 Not moving 
+20240325_152902 Pick up and place 
+20240325_155003 Pick up and place 1, 2, 3, 4, 5, 6
+20240425_093699 Not moving 6
+20240425_094425 Not moving 6
+20240426_140055 Not moving 1, 2, 3, 4, 5, 6
+20240426_141190 Pick up and place 
+20240426_141532 Moving one motor 
+20240426_141602 Moving one motor 
+20240426_141726 Moving one motor 
+20240426_141938 Moving one motor 
+20240426_141980 Moving one motor 
+20240503_163963 Pick up and place 6
+20240503_164435 Turning motor 6 
+20240503_164675 Turning motor 6 6
+20240503_165189 Turning motor 6 6
+Observations on the training distribution.
+23 training sequences in total.
+16 sequences contain no injected failure on any motor; 7 sequences contain at least one injected
+failure.
+Of the 7 faulty sequences, 5 are motor-6 only, and 2 inject failures on all six motors simultaneously.
+Motor 6 is therefore by far the most frequently faulted motor in the training data; motors 15
+appear as faulty only in the two all-motors-faulty sequences.
+The activity descriptions cover:Not moving,Pick up and place,Moving one motor,Turning
+motor 6, andMove motor 6→motor 1 sequentially.
+6.4Test conditions.xlsx(testing)
+The testing-side spreadsheet has only two columns:Test idandDescription. No failure informa-
+tion is provided; the participant must predict it. Table 2 reproduces the contents and adds the row
+count of the corresponding submission slice (see Section 6.5).
+5
+
+Table 2: Testing sequences. Row counts are the num-
+ber of rows the correspondingtest_conditionoccupies in
+sample_submission.csv.
+Test id Description Rows in submission
+20240527_094865 Transfer goods 2 423
+20240527_100759 Transfer goods 3 187
+20240527_101627 Transfer goods 2 192
+20240527_102436 Not moving 1 548
+20240527_102919 Not moving 700
+20240527_103311 Not moving 1 239
+20240527_103690 Moving one motor 745
+20240527_104247 Moving one motor 2 123
+T otal 14 157
+The test descriptions include one activity not present in the training set (Transfer goods) and three
+that are (Not moving,Moving one motor, and implicitlyPick up and placeviaTransfer goods).
+6.5 Submission le:sample_submission.csv
+sample_submission.csvhas14 158 lines(header + 14 157 data rows) and the following columns:
+idx, data_motor_1_label, data_motor_2_label, data_motor_3_label,
+data_motor_4_label, data_motor_5_label, data_motor_6_label, test_condition
+idxis a contiguous 0-based row index running from 0 to 14 156.
+All label columns are initialised to-1as a placeholder; the submission must replace every-1
+with0or1.
+test_conditionis the test-id of the testing sequence the row belongs to. The eight test ids
+appear in contiguous blocks of the sizes given in Table 2.
+The rst lines of the le are:
+idx,data_motor_1_label,data_motor_2_label,data_motor_3_label,
+data_motor_4_label,data_motor_5_label,data_motor_6_label,test_condition
+0,-1,-1,-1,-1,-1,-1,20240527_094865
+1,-1,-1,-1,-1,-1,-1,20240527_094865
+2,-1,-1,-1,-1,-1,-1,20240527_094865
+...
+7 Evaluation
+The competition is scored on themean F1 score across the six motors. For each motor
+k∈ {1, . . . ,6}, the F1 score is computed between the ground-truth columndata_motor_k_label
+in the held-out solution le and the corresponding column in the participant's submission, treating
+the time-step rows as independent samples. The six per-motor F1 scores are then averaged.
+Zero-division behaviour is explicit:
+6
+
+If bothy_trueandy_predcontain no positive labels (i.e. both sums are zero) for a motor, F1 is
+set to1.0for that motor.
+Otherwise, the standard scikit-learn F1 withzero_division=0is used.
+The exact scoring code published with the competition is reproduced below.
+Per-motor F1 helper
+1def cal_classification_perf(y_true, y_pred):
+2'''### Description
+3This function calculates the classification performance: Accuracy,
+4Precision, Recall and F1 score.
+5It considers different scenarios when divide by zero could occur for
+6Precision, Recall and F1 score calculation.
+7
+8### Parameters:
+9- y_true: The true labels.
+10- y_pred: The predicted labels.
+11
+12### Return:
+13- f1: The F1 score.
+14'''
+15# Only when y_pred contains no zeros, and y_true contains no zeros,
+16# set precision to be 1 when divide by zero occurs.
+17if sum(y_true) == 0 and sum(y_pred) == 0:
+18f1 = f1_score(y_true, y_pred, zero_division=1)
+19else:
+20f1 = f1_score(y_true, y_pred, zero_division=0)
+21
+22return f1
+Top-level scoring function
+1import pandas as pd
+2import pandas.api.types
+3from sklearn.metrics import f1_score
+4
+5
+6class ParticipantVisibleError(Exception):
+7# If you want an error message to be shown to participants, you must
+8# raise the error as a ParticipantVisibleError.
+9# All other errors will only be shown to the competition host. This
+10# helps prevent unintentional leakage of solution data.
+11pass
+12
+13
+14def score(solution: pd.DataFrame,
+15submission: pd.DataFrame,
+16row_id_column_name: str ='idx') -> float:
+17'''
+18>>> import pandas as pd
+19>>> num_rows = 5
+20>>> data = {'idx': list(range(num_rows))}
+21>>> for i in range(1, 7):
+22... column_name = f'data_motor_{i}_label'
+23... data[column_name] = [1] * num_rows
+24>>> solution = pd.DataFrame(data)
+25>>> submission = solution
+26>>> score(solution.copy(), submission.copy())
+271.0
+28'''
+29del solution[row_id_column_name]
+30del submission[row_id_column_name]
+31
+32results = []
+33for i in range(6):
+34col_name = f'data_motor_{i+1}_label'
+7
+
+35y_true = solution[col_name].values
+36y_pred = submission[col_name].values
+37result = cal_classification_perf(y_true, y_pred)
+38results.append(result)
+39
+40score_result = sum(results) / len(results)
+41return score_result
+Implications.
+The score is invariant to the ordering of rows within a test condition only insofar as the scoring
+code dropsidxbut keeps row order from the dataframes; submissions should preserve the row
+order ofsample_submission.csv.
+Thetest_conditioncolumn is not used by the scoring code (only the six label columns and the
+droppedidxare consumed), but it must still be present for the submission to match the expected
+schema.
+8 Provided helper module:utility.py
+A single Python module,utility.py, is supplied with the competition. It contains data-loading
+helpers, a sliding-window feature builder, a sequence-aware cross-validation routine, classication-
+metric utilities, a regression-residual-based fault detector class (FaultDetectReg), plotting helpers,
+and a self-contained__main__demo using aStandardScaler+LinearRegressionpipeline.
+A function-by-function API reference is given in Appendix Appendix A. The full verbatim source of
+the module is reproduced in Appendix Appendix D.
+The following subsections summarise the key concepts introduced by the helper, because they are
+referenced throughout the rest of the brieng.
+8.1 Sequence as the unit of data
+The whole helper is organised around the concept of asequence(also called atest condition):
+one row ofTest conditions.xlsx, one sub-folder on disk, one block of contiguous rows in
+sample_submission.csv. Sequences are identied by the string columntest_conditionthat is
+added when CSVs are loaded.
+The cross-validation routines splitby sequence, not by row, to avoid leakage between train and
+validation folds.
+8.2 Wide dataframe layout
+read_all_csvs_one_testmerges the six per-motor CSVs of a single test into one wide dataframe
+by prexing each motor le's columns withdata_motor_k_. The columns of the resulting wide
+frame are therefore:
+time,
+data_motor_1_position, data_motor_1_temperature,
+data_motor_1_voltage, data_motor_1_label,
+data_motor_2_position, ... data_motor_6_label,
+test_condition
+8
+
+read_all_test_data_from_pathiterates this over every test-id folder under a base directory and
+concatenates the results. An optionalpre_processingcallback is applied to each per-motor frame
+before merging (the demo uses aremove_outlierscallback  see Section 8.5).
+8.3 Sliding-window features
+prepare_sliding_windowandconcatenate_featuresturn the wide time-series frame into a at
+feature matrix by sliding a window of sizewindow_sizeacross each sequence and concatenating
+floor(window_size / sample_step)time steps' worth of features into a single row. For regression-
+style models, lagged values of the response variable up toprediction_lead_timesteps in the past
+can also be appended as features.
+Important boundary behaviours:
+The rstwindow_size - 1rows of a sequence are padded by repeating the rst row, so the
+output length equals the input length when the padding branch is used.
+Cross-validation and prediction inFaultDetectRegcall the feature builderper sequence, never
+across sequence boundaries.
+8.4 Regression-residual fault detector
+FaultDetectRegpredicts a motor's temperature from the wide-frame features using a wrapped
+regression model, computes the absolute residual between the prediction and the measurement, and
+emits label1when the residual exceeds an adaptive threshold. Key behaviours, taken verbatim from
+the source:
+Adaptive threshold.After each new normal sample, the runningmean(residual_norm) + 6
+* std(residual_norm)is computed; the working threshold is raised to that value if it is between
+the current threshold and the hard cap1.5.
+Closed-loop correction.When the detector ags a fault and the residual is at most
+abnormal_limit, the predicted temperature is substituted for the measurement in subsequent
+windowed features, to prevent error accumulation through the lagged response inputs.
+T runcation versus padding.By default the predicted label vector has lengthN -
+window_size + 1; passingcomplement_truncation=Truepads the leading positions by repeat-
+ing the rst prediction so the output length equals the input length. This matters for submission
+alignment.
+8.5 Demo in__main__
+Whenutility.pyis executed directly, the bottom of the le runs an example pipeline. It:
+1. Reads all training data from an absolute path that points at the original author's machine
+(C:/Users/Zhiguo/OneDrive - CentraleSupelec/...); this path is not portable and must be
+replaced before running the demo elsewhere.
+2. Applies a customremove_outlierscallback that clips temperature to[0,100] ◦C, voltage to
+[6000,9000], and position to[0,1000], forward-lls invalid entries, then subtracts the rst valid
+value of each channel.
+9
+
+3. Restricts training to a hard-coded list of 15 normal test ids and trains aStandardScaler→
+LinearRegressionpipeline as the regression backbone.
+4. Uses these hyperparameters throughout:window_size=10,sample_step=1,prediction_lead_time=1,
+threshold=0.8,abnormal_limit=3, and motor index 6.
+5. Constructs aFaultDetectRegaround the pipeline and runs prediction on a hard-coded subset
+of two test sequences (20240325_155003and20240425_093699).
+The demo is illustrative, not part of the evaluation. The exact list of normal test ids hard-coded
+into the demo is:
+20240105_164214, 20240105_165300, 20240105_165972,
+20240320_152031, 20240320_153841, 20240320_155664,
+20240321_122650, 20240325_135213, 20240426_141190,
+20240426_141532, 20240426_141602, 20240426_141726,
+20240426_141938, 20240426_141980, 20240503_164435
+9 Failure-injection routine (best-eort transcription)
+The Kaggle Description page includes a screenshot of the routine used to synthesise the failure
+signature in the training data. The original screenshot is at low resolution; the transcription below
+is best-eort and reproduces the routine's logic but may dier in cosmetic details (variable names,
+exact indices) from the upstream source. The routine is written in MATLAB style.
+1function temperature = inject_failure(temperature, label)
+2% Get the response above the temperature
+3tmp_temp = temperature(label == 1);
+4
+5% Length of the response
+6n_seq = length(tmp_temp);
+7
+8% Generate a random failure temperature rise.
+9% We assume the temperature decrease is 1 time slower
+10% than the temperature rise.
+11n_rise = floor(n_seq / 4);
+12
+13if ~isempty(tmp_temp)
+14% Get the starting and ending temperatures.
+15temp_start = tmp_temp(1);
+16temp_end = tmp_temp(end);
+17
+18% Generate a random highest temperature.
+19temp_high = max(temp_start, temp_end) + randi([2, 50]);
+20
+21% Generate the temperature rise.
+22temp_size_rise = floor(n_rise / (temp_high - temp_start));
+23for i = 1:(temp_high - temp_start)
+24tmp_temp(1 + (i-1)*temp_size_rise : i*temp_size_rise) = ...
+25temp_start + i;
+26end
+27tmp_temp(i*temp_size_rise + 1 : end) = temp_high;
+28
+29% Generate the temperature decrease.
+30n_down = n_seq - n_rise;
+31temp_size_down = floor(n_down / (temp_high - temp_end));
+32for i = 1:(temp_high - temp_end)
+33tmp_temp(n_rise + 1 + (i-1)*temp_size_down : ...
+34n_rise + i*temp_size_down) = temp_high - i;
+10
+
+35end
+36tmp_temp(n_rise + i*temp_size_down + 1 : end) = temp_end;
+37end
+38
+39temperature(label == 1) = tmp_temp;
+40end
+The qualitative behaviour the routine encodes, and which can be relied upon regardless of the
+cosmetic details above:
+The injection acts only on the contiguous span wherelabel == 1.
+Inside that span, the signal is replaced by a piecewise-linear triangular waveform: it ramps up
+from the starting temperature to a randomly chosen peak (randi([2,50])degrees above the
+baseline), then ramps back down to the ending temperature.
+The rise portion occupies roughly the rst quarter of the span and the decay portion occupies
+the remaining three quarters; rises are therefore steeper than decays.
+The peak amplitude and the exact span boundaries are randomised, so each injected sequence
+has a dierent magnitude and a dierent triangle width.
+10 Submission checklist
+For an LLM generating a submission le, the following invariants must hold:
+File name:submission.csv(or whatever the Kaggle UI requests at upload).
+Column order, identical tosample_submission.csv:
+idx,
+data_motor_1_label, data_motor_2_label, data_motor_3_label,
+data_motor_4_label, data_motor_5_label, data_motor_6_label,
+test_condition
+Row count: exactly 14 157 data rows;idxcontiguous from 0 to 14 156, in the same order as the
+sample.
+Eachtest_conditionblock must contain the row counts in Table 2, in the same order as the
+sample.
+Every-1placeholder in the six label columns must be replaced by0or1; leaving any-1will
+ruin the F1 score for the aected motor.
+Labels are integers, not oats; the scoring function usessklearn.metrics.f1_scoredirectly on
+the column values.
+Appendix A. Function-by-function API reference forutility.py
+The entries are presented as a description list rather than a table to keep function signatures and
+their explanations together on the page.
+11
+
+FaultDetectReg (class)
+Regression-residual fault detector. Wraps a pre-trained regression model, predicts the response,
+thresholds the absolute residual, and adapts the threshold from observed normal residuals.
+__init__
+Stores the regression model and the conguration knobs:threshold,abnormal_limit,
+window_size,sample_step,pred_lead_time, and thepre_trainedag.
+fit
+Ifpre_trained=False, trains the regression model on the rows withlabel == 0(re-segmenting the
+sequence each time the label toggles), then runs prediction on the input.
+predict
+Predicts labels and response variable, sequence by sequence, using a sliding window. Substitutes
+predicted response for measured response when a fault is agged and the residual is at most
+abnormal_limit. Optionally pads the output to match the input length (complement_truncation).
+predict_label_by_reg_base
+Inner per-window step: predicts response, computes absolute residual, emits label, updates the
+adaptive threshold usingmean + 6·stdof stored normal residuals (capped at1.5).
+run_cross_val
+Sequence-aware K-fold cross-validation. Splits bytest_condition, optionally re-trains per fold,
+returns accuracy, precision, recall, F1 for each fold.
+extract_selected_feature
+Splits a wide dataframe into a feature dataframe and a response Series (label or temperature) for a
+given motor and model type ('clf'or'reg'). Always keeps thetest_conditioncolumn on the
+feature side.
+extract_selected_feature_testing
+Same as above; intended for the test-time entry point.
+run_cv_one_motor
+Wraps feature extraction andrun_cross_valfor one motor; prints per-fold and mean±std perfor-
+mance.
+read_all_test_data_from_path
+Walks every test-id sub-folder under a base directory, callsread_all_csvs_one_teston each, con-
+catenates the results, and optionally plots the per-motor signals coloured by label. ReadsTest
+conditions.xlsxfor the descriptions.
+read_all_csvs_one_test
+Reads the six per-motor CSVs of one test, drops the original time column from each, prexes the
+remaining columns with the le name, concatenates side-by-side, re-attaches a normalised time
+column (falling back to a synthetic 0.1 s grid), tags every row withtest_condition, and drops rows
+that are NaN in any non-label column.
+concatenate_features
+Sub-routine that takes one window's worth of rows and a corresponding response slice, samples
+everysample_step-th row from the window, attens the result into a single feature row, optionally
+appends lagged response values for regression mode, and appends the row to a growing feature list.
+prepare_sliding_window
+Iteratesconcatenate_featuresacross every position of every sequence. Handles short prexes by
+repeating the rst row. Returns(X, y)as a dataframe and Series.
+12
+
+run_cross_val (free function)
+Generic sequence-aware K-fold cross-validation that works for either a regression model (metrics:
+max error, RMSE, exceedance rate) or a classier (metrics: accuracy, precision, recall, F1).
+cal_classification_perf
+Computes accuracy, precision, recall and F1 with explicit zero-division handling (precision/recall/F1
+set to 1 when both vectors are all zeros).
+run_mdl
+Fits a model on the training matrix, returns the tted model and the predictions on both training
+and testing matrices.
+show_reg_result* / show_clf_result*
+Matplotlib visualisations of regression residuals or classication predictions; print per-run perfor-
+mance summaries.
+remove_outliers (in __main__)
+Demo-only preprocessing callback that clips temperature to[0,100], voltage to[6000,9000], position
+to[0,1000], forward-lls the invalidated entries, and subtracts the rst valid value of each channel.
+Appendix B. File tree of the supplied data package
+robot-predictive-maintenance-season-2026/
+|-- sample_submission.csv (14,158 lines = header + 14,157 rows)
+|-- utility.py
+|-- training_data/
+| `-- training_data/
+| |-- Test conditions.xlsx
+| |-- 20240105_164214/ Not moving
+| |-- 20240105_165300/ Pick up and place
+| |-- 20240105_165972/ Not moving
+| |-- 20240320_152031/ Not moving
+| |-- 20240320_153841/ Move motor 6 -> motor 1 sequentially
+| |-- 20240320_155664/ Not moving
+| |-- 20240321_122650/ Pick up and place
+| |-- 20240325_135213/ Not moving
+| |-- 20240325_152902/ Pick up and place
+| |-- 20240325_155003/ Pick up and place [faults: 1-6]
+| |-- 20240425_093699/ Not moving [fault: 6]
+| |-- 20240425_094425/ Not moving [fault: 6]
+| |-- 20240426_140055/ Not moving [faults: 1-6]
+| |-- 20240426_141190/ Pick up and place
+| |-- 20240426_141532/ Moving one motor
+| |-- 20240426_141602/ Moving one motor
+| |-- 20240426_141726/ Moving one motor
+| |-- 20240426_141938/ Moving one motor
+| |-- 20240426_141980/ Moving one motor
+| |-- 20240503_163963/ Pick up and place [fault: 6]
+| |-- 20240503_164435/ Turning motor 6
+| |-- 20240503_164675/ Turning motor 6 [fault: 6]
+| `-- 20240503_165189/ Turning motor 6 [fault: 6]
+`-- testing_data/
+`-- testing_data/
+13
+
+|-- Test conditions.xlsx
+|-- 20240527_094865/ Transfer goods
+|-- 20240527_100759/ Transfer goods
+|-- 20240527_101627/ Transfer goods
+|-- 20240527_102436/ Not moving
+|-- 20240527_102919/ Not moving
+|-- 20240527_103311/ Not moving
+|-- 20240527_103690/ Moving one motor
+`-- 20240527_104247/ Moving one motor
+Every test-id folder contains exactly six files:
+data_motor_1.csv ... data_motor_6.csv
+with columns: time, position, temperature, voltage, label
+(`label' is omitted -- as a column it is absent or to be ignored -- in
+the testing data).
+Appendix C. Glossary
+Sequence / test condition
+One acquisition of the robot, identied by a string of the formYYYYMMDD_xxxxxx. One folder on
+disk, one row ofTest conditions.xlsx, one contiguous block in the submission le.
+Wide frame
+The dataframe produced byread_all_csvs_one_test: one row per time step, columns for each
+(motor, signal) pair, plustimeandtest_condition.
+Window size
+The number of consecutive time steps fed into the feature builder per prediction. The demo uses
+10.
+Sample step
+Stride inside a window when sampling time steps to atten into the feature row. The demo uses
+1 (every step in the window is used).
+Prediction lead time
+Number of steps into the future the regression model predicts. The demo uses 1 (one-step-ahead).
+Residual error
+Absolute dierence between the regression model's predicted temperature and the measured
+temperature. The basis for the binary label inFaultDetectReg.
+Adaptive threshold
+Working residual threshold that grows with the empiricalmean + 6·stdof stored normal resid-
+uals, capped at 1.5.
+T runcation versus padding
+With a window of sizew, a length-Nsequence yieldsN−w+ 1predictions; the helper can
+either return that shorter vector (truncated) or pad the leading positions by repeating the rst
+prediction (complemented).
+Appendix D. Full source ofutility.py
+The complete source of the module supplied with the competition is reproduced verbatim below.
+Line numbers are preserved.
+14
+
+1import matplotlib.pyplot as plt
+2from numpy.core.fromnumeric import shape
+3from sklearn.metrics import max_error, mean_squared_error, accuracy_score, precision_score, recall_score, f1_score
+4from sklearn.model_selection import KFold
+5from sklearn.preprocessing import StandardScaler
+6import numpy as np
+7import pandas as pd
+8from pathlib import Path
+9from pandas.plotting import scatter_matrix
+10import logging
+11import sys
+12import os
+13import matplotlib.pyplot as plt
+14import copy
+15from tqdm import tqdm
+16
+17
+18# We provide some supporting function for training a data-driven digital twin for predicting the temperature of motors.
+19
+20
+21class FaultDetectReg():
+22'''### Description
+23This is the class for fault detection based on regression models.
+24
+25### Initialize
+26Initialize the class with the following parameters:
+27- reg_mdl: The pre-trained regression model.
+28- pre_trained: If the provided reg_mdl is pretrained. Default is True.
+29- threshold: threshold for the residual error. If the residual error is larger than the threshold, we consider it as a fault. Default is 1.
+30- abnormal_limit: If the model predict a abnormal point and its residual error <= abnormal_limit, the predicted value will be used to replace
+31the measured value in the next prediction. Default is 1.
+32- window_size: Size of the sliding window. The previous window size points will be used to create a new feature.
+33- sample_step: We take every sample_step points from the window_size. default is 1.
+34- prediction_lead_time: The number of time steps to predict into the future. Only valid for regression model. Default is 1.
+35
+36### Attributes
+37- reg_mdl: The pre-trained regression model.
+38- pre_trained: If the provided reg_mdl is pretrained. Default is True.
+39- threshold: threshold for the residual error. If the residual error is larger than the threshold, we consider it as a fault. Default is 1.
+40- abnormal_limit: If the model predict a abnormal point and its residual error <= abnormal_limit, the predicted value will be used to replace
+41the measured value in the next prediction. Default is 1.
+42- window_size: Size of the sliding window. The previous window size points will be used to create a new feature.
+43- sample_step: We take every sample_step points from the window_size. default is 1.
+44- prediction_lead_time: The number of time steps to predict into the future. Only valid for regression model. Default is 1.
+45- residual_norm: The stored residual errors for all the normal samples in the current sequence.
+46It is used to calculate the threshold adpatively.
+47- threshold_int: The threshold value set by the initialization function.
+48
+49### Methods
+50- fit(): This method learns the regression model from the training data. If self.pre_trained is True, it will directly use the pre-trained
+,→model.
+51- predict(): This method predicts the labels for the input data.
+52- predict_label_by_reg_base(): This method is the base function for predicting the label, called from self.predict().
+53- run_cross_val(): This method defines a cross validation scheme to test the performance of the model.
+54
+55'''
+56def __init__(self, reg_mdl, pre_trained: bool=True, threshold: int=1, abnormal_limit: int=3, window_size: int = 1, sample_step: int = 1,
+,→pred_lead_time: int = 1):
+57'''### Description
+58Initialization function.
+59'''
+60self.reg_mdl = reg_mdl
+61self.window_size = window_size
+62self.sample_step = sample_step
+63self.pred_lead_time = pred_lead_time
+64self.threshold = threshold
+65self.threshold_int = threshold
+66self.pre_trained = pre_trained
+67self.abnormal_limit = abnormal_limit
+68self.residual_norm = []
+69
+70
+71def fit(self, df_x, y_label, y_response):
+72'''### Description
+73Learn the regression model from the training data, and use the trained model to predict the labels and the repsonse variables for the
+,→training data.
+74If self.pre_trained is True, it will directly use the pre-trained model.
+75
+76### Parameters
+77- df_x: The training features.
+78- y_label: The labels in the training dataset.
+79- y_response: The response variable in the training dataset.
+80
+81### Returns
+82- y_label_pred: The predicted labels using the best regression model learnt from training data.
+83- y_response_pred: The predicted response variable using the best regression model learnt from training data.
+84'''
+85# Train the regression model if not pretrained.
+86if not self.pre_trained:
+87# Train a regression model first, based on the normal samples.
+88# Align indices
+89df_x_normal = copy.deepcopy(df_x)
+90# Initialize a counter for numbering
+91counter = 0
+92flag = False
+93# Iterate over each row in df
+94for i in range(len(y_label)):
+95value = y_label.iloc[i]
+96if i>0:
+97if value==0 and y_label.iloc[i-1] == 1:
+98flag = True
+15
+
+99counter += 1
+100if value==1 and y_label.iloc[i-1] == 0:
+101flag = False
+102if flag:
+103df_x_normal.at[df_x_normal.index[i],'test_condition'] += f'_{counter}'
+104
+105df_x_normal = df_x_normal[y_label==0]
+106y_response_normal = y_response[y_label==0]
+107
+108# Train the regression model.
+109x_tr, y_temp_tr = prepare_sliding_window(df_x=df_x_normal, y=y_response_normal, window_size=self.window_size,
+,→sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='reg')
+110self.reg_mdl = self.reg_mdl.fit(x_tr, y_temp_tr)
+111
+112# Calculate and return the predicted labels and response variable for the training data.
+113y_label_pred, y_response_pred = self.predict(df_x, y_response)
+114
+115return y_label_pred, y_response_pred
+116
+117
+118def predict(self, df_x_test, y_response_test, complement_truncation=False):
+119'''### Description
+120Predict the labels using the trained regression model and the measured response variable.
+121Note that if a fault is predicted, the predicted, not measured response variable will be used to concatenate features
+122for predicting the values of next response variable.
+123
+124### Parameters
+125- df_x_test: The testing features.
+126- y_response_test: The measured response variable.
+127- complement_truncation: If True, the truncated points in each sequence before the first sliding window will be complemented. Default is
+,→Faulse.
+128
+129### Return
+130- y_label_pred: The predicted labels.
+131- y_response_pred: The predicted response variable.
+132'''
+133# Get parameters.
+134window_size = self.window_size
+135sample_step = self.sample_step
+136prediction_lead_time = self.pred_lead_time
+137
+138# Handle exception.
+139if'test_condition'not in df_x_test.columns:
+140# Add the'test_condition'column with all values set to'unspecified'
+141df_x_test['test_condition'] ='unspecified'
+142
+143# Get the sequence names.
+144sequence_name_list = df_x_test['test_condition'].unique().tolist()
+145
+146# Initial values
+147y_label_pred = []
+148y_response_pred = []
+149
+150# Process sequence by sequence.
+151for name in tqdm(sequence_name_list):
+152# Reset the stored residual errors for normal samples and the threshold value.
+153self.residual_norm = []
+154self.threshold = self.threshold_int
+155
+156# Extract one sequence.
+157df_x_test_seq = df_x_test[df_x_test['test_condition']==name]
+158y_temp_test_seq = y_response_test[df_x_test['test_condition']==name]
+159y_temp_local = copy.deepcopy(y_temp_test_seq)
+160
+161# Initial values of the prediction.
+162# Length is len - window_size + 1 because we need to use the sliding window to define features.
+163y_label_pred_tmp = np.zeros(len(df_x_test_seq)-window_size+1)# Predicted label.
+164y_temp_pred_tmp = np.zeros(len(df_x_test_seq)-window_size+1)# Predicted temperature.
+165
+166# Making the prediction using a sequential approach.
+167for i in range(window_size, len(df_x_test_seq)+1):
+168# Get the data up to current moment i-1.
+169tmp_df_x = df_x_test_seq.iloc[i-window_size:i, :]
+170tmp_y_temp_measure = y_temp_local.iloc[i-window_size:i]
+171
+172# Use the same sliding window to generate features.
+173feature_x, _ = concatenate_features(df_input=tmp_df_x, y_input=tmp_y_temp_measure, X_window=[], y_window=[],
+174window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type='reg')
+175
+176# Make prediction.
+177tmp_y_label_pred, tmp_y_temp_pred, tmp_residual= self.predict_label_by_reg_base(X=feature_x,
+,→y_temp_measure=tmp_y_temp_measure.iloc[-1])
+178
+179# Save the prediction at the current moment i.
+180y_label_pred_tmp[i-window_size] = tmp_y_label_pred[-1]
+181y_temp_pred_tmp[i-window_size] = tmp_y_temp_pred[-1]
+182
+183# If we predict a failure, we replace the measure with the predicted temperature.
+184# This is to avoid accumulation of errors.
+185if tmp_y_label_pred[-1] == 1 and tmp_residual <= self.abnormal_limit:
+186y_temp_local.iloc[i-1] = tmp_y_temp_pred[-1]
+187
+188# Save the results and proceed to the next sequence.
+189if complement_truncation:# If we need to complement, complement with 0.
+190len_diff = len(df_x_test_seq) - len(y_label_pred_tmp)
+191# If df_x_test_seq is smaller, adjust the length of y_label_pred_tmp
+192if len_diff > 0:
+193# Create a list of the first element repeated len_diff times
+194y_label_pred_tmp = np.concatenate((np.full(len_diff, y_label_pred_tmp[0]), y_label_pred_tmp))
+195y_temp_pred_tmp = np.concatenate((np.full(len_diff, y_temp_pred_tmp[0]), y_temp_pred_tmp))
+196y_label_pred.extend(y_label_pred_tmp)
+197y_response_pred.extend(y_temp_pred_tmp)
+16
+
+198else:
+199y_label_pred.extend(y_label_pred_tmp)
+200y_response_pred.extend(y_temp_pred_tmp)
+201
+202return y_label_pred, y_response_pred
+203
+204
+205def predict_label_by_reg_base(self, X, y_temp_measure):
+206'''### Description
+207Predict the response variable (temperature) using the regression model.
+208Then, it saves the residuals of all the normal samples in the current sequence.
+209
+210### Parameters
+211- X: The features.
+212- y_temp_measure: The temperature measurements.
+213
+214### Return
+215- y_label pred: The predicted labels.
+216- y_temp_pred: The predicted temperature.
+217- residual_error: The residual error.
+218'''
+219# Predict the temperature
+220mdl = self.reg_mdl# Get the regression model.
+221y_temp_pred = mdl.predict(X)# Predict the temperature.
+222# Calculate the residual
+223residual_error = np.array(abs(y_temp_pred - y_temp_measure))
+224
+225# Predict the label based on the threshold
+226y_label_pred = np.where(residual_error <= self.threshold, 0, 1)
+227
+228# Update the residual error database.
+229self.residual_norm.extend(residual_error[y_label_pred==0])
+230threshold_prop = np.mean(self.residual_norm) + 6*np.std(self.residual_norm)
+231# threshold_prop = np.percentile(self.residual_norm, 75) + 1.5*(np.percentile(self.residual_norm, 75)-np.percentile(self.residual_norm,
+,→25))
+232
+233if self.threshold < threshold_prop and threshold_prop < 1.5:
+234self.threshold = threshold_prop
+235
+236return y_label_pred, y_temp_pred, residual_error
+237
+238
+239def run_cross_val(self, df_x, y_label, y_response, n_fold=5, single_run_result=True):
+240'''## Description
+241Run a k-fold cross validation based on the testing conditions. Each test sequence is considered as a elementary part in the data.
+242
+243## Parameters:
+244- df_X: The dataframe containing the features. Must have a column named "test_condition".
+245- y_label: The target variable, i.e., failure.
+246- y_response: The response variable associated with the target variable, e.g., temperature.
+247- n_fold: The number of folds. Default is 5.
+248- single_run_result: Whether to return the single run result. Default is True.
+249
+250## Return
+251- perf: A dataframe containing the performance indicators.
+252'''
+253
+254# Get the unique test conditions.
+255test_conditions = df_x['test_condition'].unique().tolist()
+256
+257# Define the cross validator.
+258kf = KFold(n_splits=n_fold)
+259
+260# Set initial values for perf to store the performance of each run.
+261perf = np.zeros((n_fold, 4))
+262
+263counter = 0
+264for train_index, test_index in kf.split(test_conditions):
+265# Get the dataset names.
+266names_train = [test_conditions[i] for i in train_index]
+267names_test = [test_conditions[i] for i in test_index]
+268
+269# If not pretrained, train the model.
+270if not self.pre_trained:
+271df_tr = df_x[df_x['test_condition'].isin(names_train)]
+272y_tr = y_label[df_x['test_condition'].isin(names_train)]
+273y_response_tr = y_response[df_x['test_condition'].isin(names_train)]
+274
+275# Train the model.
+276y_tr_pred, y_response_tr_pred = self.fit(df_x=df_tr, y_label=y_tr, y_response=y_response_tr)
+277
+278# Extract the training and testing data.
+279df_test = df_x[df_x['test_condition'].isin(names_test)]
+280y_test = y_label[df_x['test_condition'].isin(names_test)]
+281y_response_test = y_response[df_x['test_condition'].isin(names_test)]
+282
+283
+284# Predict for the testing data.
+285y_pred, y_response_test_pred = self.predict(df_x_test=df_test, y_response_test=y_response_test, complement_truncation=True)
+286
+287# Calculate the performance.
+288accuracy, precision, recall, f1 = cal_classification_perf(y_test, pd.Series(y_pred))
+289perf[counter, :] = np.array([accuracy, precision, recall, f1])
+290
+291# Show single run results.
+292if single_run_result:
+293if self.pre_trained:# Only show the testing performance.
+294# Show the results.
+295fig_1 = plt.figure(figsize = (8,18))
+296axes_test = [fig_1.add_subplot(3, 1, 1), fig_1.add_subplot(3, 1, 2), fig_1.add_subplot(3, 1, 3)]
+297show_reg_result_single_run(y_response_test.reset_index(drop=True), y_response_test_pred, axes_test,'testing', self.threshold)
+298
+17
+
+299fig_2 = plt.figure(figsize = (8,12))
+300ax_test_true = fig_2.add_subplot(2,1,1)
+301ax_test_pred = fig_2.add_subplot(2,1,2)
+302show_clf_result_single_run(y_test, y_pred, ax_test_true, ax_test_pred, suffix='testing')
+303
+304plt.show()
+305else:
+306# Truncate the true values for y_test and y_response_test in the same format as the concatenated features.
+307_, y_tr = prepare_sliding_window(df_x=df_tr, y=y_tr, window_size=self.window_size, sample_step=self.sample_step,
+,→prediction_lead_time=self.pred_lead_time, mdl_type='clf')
+308_, y_response_tr = prepare_sliding_window(df_x=df_tr, y=y_response_tr, window_size=self.window_size,
+,→sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='reg')
+309_, y_response_test = prepare_sliding_window(df_x=df_test, y=y_response_test, window_size=self.window_size,
+,→sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='reg')
+310
+311# Show the results.
+312show_reg_result(y_tr=y_response_tr, y_test=y_response_test, y_pred_tr=y_response_tr_pred, y_pred=y_response_test_pred,
+,→threshold=self.threshold)
+313show_clf_result(y_tr, y_test, y_tr_pred, y_pred)
+314
+315counter += 1
+316
+317return pd.DataFrame(data=perf, columns=['Accuracy','Precision','Recall','F1 score'])
+318
+319
+320def extract_selected_feature_testing(df_data: pd.DataFrame, feature_list: list, motor_idx: int, mdl_type: str):
+321'''### Description
+322Extract the selected features from the dataframe. Used for testing data.
+323'''
+324feature_list_local = copy.deepcopy(feature_list)
+325if mdl_type =='clf':
+326y_name = f'data_motor_{motor_idx}_label'
+327elif mdl_type =='reg':
+328y_name = f'data_motor_{motor_idx}_temperature'
+329else:
+330raise ValueError('mdl_type must be \'clf\'or \'reg\'.')
+331
+332if y_name in feature_list_local:
+333feature_list_local.remove(y_name)
+334
+335feature_list_local.append('test_condition')
+336df_x = df_data[feature_list_local]
+337y = df_data.loc[:, y_name]
+338
+339return df_x, y
+340
+341
+342def extract_selected_feature(df_data: pd.DataFrame, feature_list: list, motor_idx: int, mdl_type: str):
+343'''### Description
+344Extract the selected features and the response variable from the dataframe.
+345'''
+346feature_list_local = copy.deepcopy(feature_list)
+347if mdl_type =='clf':
+348y_name = f'data_motor_{motor_idx}_label'
+349elif mdl_type =='reg':
+350y_name = f'data_motor_{motor_idx}_temperature'
+351else:
+352raise ValueError('mdl_type must be \'clf\'or \'reg\'.')
+353
+354if y_name in feature_list_local:
+355feature_list_local.remove(y_name)
+356
+357feature_list_local.append('test_condition')
+358df_x = df_data[feature_list_local]
+359y = df_data.loc[:, y_name]
+360
+361return df_x, y
+362
+363
+364def run_cv_one_motor(motor_idx, df_data, mdl, feature_list, n_fold=5, threshold=3, window_size=1, sample_step=1, prediction_lead_time=1,
+,→single_run_result=True, mdl_type='clf'):
+365'''### Description
+366Run cross validation for a given motor and return the performance metrics for each cv run.
+367Can be used for both classification and regression models.
+368'''
+369df_x, y = extract_selected_feature(df_data, feature_list, motor_idx, mdl_type)
+370
+371print(f'Model for motor {motor_idx}:')
+372df_perf = run_cross_val(mdl, df_x, y, n_fold=n_fold, threshold=threshold, window_size=window_size, sample_step=sample_step,
+,→prediction_lead_time=prediction_lead_time, single_run_result=single_run_result, mdl_type=mdl_type)
+373print(df_perf)
+374print('\n')
+375print('Mean performance metric and standard error:')
+376for name, metric, error in zip(df_perf.columns, df_perf.mean(), df_perf.std()):
+377print(f'{name}: {metric:.4f} +- {error:.4f}')
+378print('\n')
+379
+380return df_perf
+381
+382
+383def read_all_test_data_from_path(base_dictionary: str, pre_processing: callable=None, is_plot=True) -> pd.DataFrame:
+384'''## Description
+385Read all the test data from a folder. The folder should contain subfolders for each test. Each subfolder should contain the six CSV files for
+,→each motor.
+386The test condition in the input will be recorded as a column in the combined dataframe.
+387'''
+388path_list = os.listdir(base_dictionary)
+389path_list = [item for item in path_list if os.path.isdir(os.path.join(base_dictionary, item))]
+390path_list = sorted(path_list)
+391
+392df_data = pd.DataFrame()
+393for tmp_path in path_list:
+18
+
+394path = base_dictionary + tmp_path
+395tmp_df = read_all_csvs_one_test(path, tmp_path, pre_processing)
+396df_data = pd.concat([df_data, tmp_df])
+397df_data = df_data.reset_index(drop=True)
+398
+399df_test_conditions = pd.read_excel(base_dictionary+'Test conditions.xlsx')
+400
+401if is_plot:
+402for selected_sequence_idx in path_list:
+403filtered_df = df_data[df_data['test_condition'] == selected_sequence_idx]
+404print('{}: {}\n'.format(selected_sequence_idx, df_test_conditions[df_test_conditions['Test id'] ==
+,→selected_sequence_idx]['Description']))
+405
+406fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(15, 10))
+407for ax, col in zip(axes.flat, ['data_motor_1_position','data_motor_2_position','data_motor_3_position',
+408'data_motor_1_temperature','data_motor_2_temperature','data_motor_3_temperature',
+409'data_motor_1_voltage','data_motor_2_voltage','data_motor_3_voltage']):
+410label_name = col[:13] +'label'
+411if sum(filtered_df[label_name]==0)>0 or sum(filtered_df[label_name]==1)>0:
+412tmp = filtered_df[filtered_df[label_name]==0]
+413ax.plot(tmp['time'], tmp[col], marker='o', linestyle='None', label=col)
+414tmp = filtered_df[filtered_df[label_name]==1]
+415ax.plot(tmp['time'], tmp[col], marker='x', color='red', linestyle='None', label=col)
+416else:
+417ax.plot(filtered_df['time'], filtered_df[col], marker='o', linestyle='None', label=col)
+418ax.set_ylabel(col)
+419
+420fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(15, 10))
+421for ax, col in zip(axes.flat, ['data_motor_4_position','data_motor_5_position','data_motor_6_position',
+422'data_motor_4_temperature','data_motor_5_temperature','data_motor_6_temperature',
+423'data_motor_4_voltage','data_motor_5_voltage','data_motor_6_voltage']):
+424label_name = col[:13] +'label'
+425if sum(filtered_df[label_name]==0)>0 or sum(filtered_df[label_name]==1)>0:
+426tmp = filtered_df[filtered_df[label_name]==0]
+427ax.plot(tmp['time'], tmp[col], marker='o', linestyle='None', label=col)
+428tmp = filtered_df[filtered_df[label_name]==1]
+429ax.plot(tmp['time'], tmp[col], marker='x', color='red', linestyle='None', label=col)
+430else:
+431ax.plot(filtered_df['time'], filtered_df[col], marker='o', linestyle='None', label=col)
+432ax.set_ylabel(col)
+433
+434plt.show()
+435
+436return df_data
+437
+438
+439def read_all_csvs_one_test(folder_path: str, test_id: str ='unknown', pre_processing: callable = None) -> pd.DataFrame:
+440'''## Description
+441Combine the six CSV files (each for a motor) in a folder into a single DataFrame.
+442'''
+443csv_files = [file for file in os.listdir(folder_path) if file.endswith('.csv')]
+444combined_df = pd.DataFrame()
+445
+446for file in csv_files:
+447file_path = os.path.join(folder_path, file)
+448df = pd.read_csv(file_path)
+449df = df.drop(labels=df.columns[0], axis=1)
+450
+451if pre_processing:
+452pre_processing(df)
+453
+454file_name = os.path.splitext(file)[0]
+455df = df.add_prefix(f'{file_name}_')
+456combined_df = pd.concat([combined_df, df], axis=1)
+457
+458df = pd.read_csv(file_path)
+459combined_df = pd.concat([df['time'], combined_df], axis=1)
+460
+461try:
+462time_since_first_row = combined_df['time'] - combined_df['time'].iloc[0]
+463combined_df['time'] = time_since_first_row
+464except:
+465num_rows = combined_df.shape[0]
+466time_values = [i * 0.1 for i in range(num_rows)]
+467combined_df['time'] = time_values
+468
+469combined_df.loc[:,'test_condition'] = test_id
+470
+471label_columns = combined_df.columns[combined_df.columns.str.endswith('_label')]
+472non_label_columns = combined_df.columns.difference(label_columns)
+473mask = combined_df[non_label_columns].notna().all(axis=1)
+474combined_df = combined_df[mask]
+475
+476return combined_df
+477
+478
+479def concatenate_features(df_input, y_input=None, X_window=[], y_window=[], window_size=1, sample_step=1, prediction_lead_time=1, mdl_type='clf'):
+480'''### Description
+481This function takes every sample_step point from a interval window_size, and concatenate the extracted
+482features into a new feature list X_window. It extracts the corresponding y in y_window.
+483'''
+484idx_last_element = len(df_input)-1
+485idx_samples = list(reversed(range(idx_last_element, idx_last_element-window_size, -1*sample_step)))
+486new_features = df_input.iloc[idx_samples].drop(columns=['test_condition']).values.flatten().tolist()
+487
+488if mdl_type =='reg':
+489if prediction_lead_time<=1:
+490prediction_lead_time = 1
+491if prediction_lead_time<window_size and window_size>1:
+492tmp_idx_pred = [x for x in idx_samples if x <= idx_last_element-prediction_lead_time]
+493if y_input is not None:
+494new_features.extend(y_input.iloc[tmp_idx_pred].values.flatten().tolist())
+19
+
+495
+496X_window.append(new_features)
+497if y_input is not None:
+498y_window.append(y_input.iloc[idx_last_element])
+499return X_window, y_window
+500else:
+501return X_window
+502
+503
+504def prepare_sliding_window(df_x, y=None, sequence_name_list=None, window_size=1, sample_step=1, prediction_lead_time=1, mdl_type='clf'):
+505'''## Description
+506Create a new feature matrix X and corresponding y, by sliding a window of size window_size.
+507'''
+508X_window = []
+509y_window = []
+510
+511if sequence_name_list is None:
+512sequence_name_list = df_x['test_condition'].unique().tolist()
+513
+514def complete_window(df_before_complete):
+515if isinstance(df_before_complete, pd.DataFrame):
+516is_series = False
+517n_size = len(df_before_complete)
+518elif isinstance(df_before_complete, pd.Series):
+519is_series = True
+520n_size = len(df_before_complete)
+521df_before_complete = df_before_complete.to_frame(name='Value')
+522else:
+523raise ValueError("Input must be a pandas DataFrame or Series.")
+524
+525if n_size >= window_size:
+526return df_before_complete if not is_series else df_before_complete.iloc[0]
+527
+528first_row = df_before_complete.iloc[0]
+529new_rows = pd.DataFrame([first_row] * (window_size - n_size), columns=df_before_complete.columns)
+530df_after_complete = pd.concat([new_rows, df_before_complete], ignore_index=True)
+531
+532if is_series:
+533df_after_complete = df_after_complete.iloc[:, 0]
+534
+535return df_after_complete
+536
+537for name in sequence_name_list:
+538df_tmp = df_x[df_x['test_condition']==name]
+539if y is not None:
+540y_tmp = y[df_x['test_condition']==name]
+541
+542for i in range(1, window_size):
+543df_input = df_tmp.iloc[0:i, :]
+544df_input = complete_window(df_input)
+545
+546y_input = y_tmp.iloc[0:i]
+547y_input = complete_window(y_input)
+548
+549X_window, y_window = concatenate_features(df_input=df_input, y_input=y_input,
+550X_window=X_window, y_window=y_window, window_size=window_size, sample_step=sample_step,
+,→prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
+551
+552for i in range(window_size, len(df_tmp)+1):
+553X_window, y_window = concatenate_features(df_input=df_tmp.iloc[i-window_size:i, :], y_input=y_tmp.iloc[i-window_size:i],
+554X_window=X_window, y_window=y_window, window_size=window_size, sample_step=sample_step,
+,→prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
+555else:
+556for i in range(1, window_size):
+557df_input = df_tmp.iloc[0:i, :]
+558df_input = complete_window(df_input)
+559X_window = concatenate_features(df_input=df_input,
+560X_window=X_window, window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time,
+,→mdl_type=mdl_type)
+561
+562for i in range(window_size, len(df_tmp)+1):
+563X_window = concatenate_features(df_input=df_tmp.iloc[i-window_size:i, :],
+564X_window=X_window, window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time,
+,→mdl_type=mdl_type)
+565
+566X_window = pd.DataFrame(X_window)
+567
+568if y is not None:
+569y_window = pd.Series(y_window)
+570return X_window, y_window
+571else:
+572return X_window
+573
+574
+575def run_cross_val(mdl, df_x, y, n_fold=5, threshold=3, window_size=1, sample_step=1, prediction_lead_time=1, single_run_result=True,
+,→mdl_type='reg'):
+576'''## Description
+577Run a k-fold cross validation based on the testing conditions.
+578'''
+579test_conditions = df_x['test_condition'].unique().tolist()
+580kf = KFold(n_splits=n_fold)
+581
+582if mdl_type =='reg':
+583perf = np.zeros((n_fold, 3))
+584elif mdl_type =='clf':
+585perf = np.zeros((n_fold, 4))
+586else:
+587TypeError('mdl_type should be either "reg" or "clf".')
+588
+589counter = 0
+590for train_index, test_index in kf.split(test_conditions):
+591names_train = [test_conditions[i] for i in train_index]
+20
+
+592names_test = [test_conditions[i] for i in test_index]
+593
+594X_train, y_train = prepare_sliding_window(df_x, y, names_train, window_size=window_size, sample_step=sample_step,
+,→prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
+595X_test, y_test = prepare_sliding_window(df_x, y, names_test, window_size, sample_step=sample_step,
+,→prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
+596
+597if mdl_type =='reg':
+598mdl, y_pred_tr, y_pred = run_mdl(mdl, X_train, y_train, X_test)
+599perf[counter, :] = np.array([max_error(y_test, y_pred),
+600mean_squared_error(y_test, y_pred, squared=False),
+601sum(abs(y_pred - y_test)>threshold)/y_test.shape[0]])
+602if single_run_result:
+603show_reg_result(y_train, y_test, y_pred_tr, y_pred, threshold=threshold)
+604elif mdl_type =='clf':
+605mdl, y_pred_tr, y_pred = run_mdl(mdl, X_train, y_train, X_test)
+606accuracy, precision, recall, f1 = cal_classification_perf(y_test, y_pred)
+607perf[counter, :] = np.array([accuracy, precision, recall, f1])
+608if single_run_result:
+609show_clf_result(y_train, y_test, y_pred_tr, y_pred)
+610else:
+611TypeError('mdl_type should be either "reg" or "clf".')
+612
+613counter += 1
+614
+615if mdl_type =='reg':
+616return pd.DataFrame(data=perf, columns=['Max error','RMSE','Exceed boundary rate'])
+617elif mdl_type =='clf':
+618return pd.DataFrame(data=perf, columns=['Accuracy','Precision','Recall','F1 score'])
+619else:
+620TypeError('mdl_type should be either "reg" or "clf".')
+621
+622
+623def cal_classification_perf(y_true, y_pred):
+624'''### Description
+625Accuracy, Precision, Recall and F1 score, with zero-division handling.
+626'''
+627accuracy = accuracy_score(y_true, y_pred)
+628if sum(y_true)==0 and sum(y_pred)==0:
+629precision = precision_score(y_true, y_pred, zero_division=1)
+630recall = recall_score(y_true, y_pred, zero_division=1)
+631f1 = f1_score(y_true, y_pred, zero_division=1)
+632else:
+633precision = precision_score(y_true, y_pred, zero_division=0)
+634recall = recall_score(y_true, y_pred, zero_division=0)
+635f1 = f1_score(y_true, y_pred, zero_division=0)
+636
+637return accuracy, precision, recall, f1
+638
+639
+640def run_mdl(mdl, X_tr, y_tr, X_test):
+641'''## Description
+642Fit a model and return predictions on both training and testing sets.
+643'''
+644mdl = mdl.fit(X_tr, y_tr)
+645y_pred_tr = mdl.predict(X_tr)
+646y_pred = mdl.predict(X_test)
+647return mdl, y_pred_tr, y_pred
+648
+649
+650def show_reg_result(y_tr, y_test, y_pred_tr, y_pred, threshold=3):
+651fig_1 = plt.figure(figsize = (16,18))
+652axes_tr = [fig_1.add_subplot(3, 2, 1), fig_1.add_subplot(3, 2, 3), fig_1.add_subplot(3, 2, 5)]
+653axes_test = [fig_1.add_subplot(3, 2, 2), fig_1.add_subplot(3, 2, 4), fig_1.add_subplot(3, 2, 6)]
+654show_reg_result_single_run(y_tr, y_pred_tr, axes_tr,'training', threshold)
+655show_reg_result_single_run(y_test, y_pred, axes_test,'testing', threshold)
+656plt.show()
+657
+658
+659def show_reg_result_single_run(y_true, y_pred, axes, suffix='training', threshold=3):
+660axes[0].set_xlabel('index of data point', fontsize = 15)
+661axes[0].set_ylabel('y', fontsize = 15)
+662axes[0].set_title(f'Regression results on the {suffix} dataset', fontsize = 20)
+663axes[0].plot(range(len(y_true)), y_true,'xb', label='Truth')
+664axes[0].plot(range(len(y_pred)), y_pred,'or', label='Prediction')
+665axes[0].legend()
+666
+667axes[1].set_xlabel('Index of the data points', fontsize = 15)
+668axes[1].set_ylabel('Residual error', fontsize = 15)
+669axes[1].set_title(f'Residual errors on the {suffix} dataset', fontsize = 20)
+670axes[1].plot(y_pred - y_true,'o')
+671axes[1].hlines([threshold, -1*threshold], 0, len(y_true), linestyles='dashed', colors='r')
+672
+673axes[2].set_xlabel('Residual errors', fontsize = 15)
+674axes[2].set_ylabel('Counts', fontsize = 15)
+675axes[2].set_title(f'Distribution of residual errors ({suffix})', fontsize = 20)
+676axes[2].hist(y_pred - y_true)
+677axes[2].axvline(x=threshold, linestyle='--', color='r')
+678axes[2].axvline(x=-1*threshold, linestyle='--', color='r')
+679
+680print('\n New run:\n')
+681print(f'{suffix} performance, max error is:'+ str(max_error(y_true, y_pred) ))
+682print(f'{suffix} performance, mean root square error is:'+ str(mean_squared_error(y_true, y_pred , squared=False)))
+683print(f'{suffix} performance, residual error > {threshold}:'+ str(sum(abs(y_true - y_pred)>threshold)/y_true.shape[0]*100) +'%')
+684
+685
+686def show_clf_result(y_tr, y_test, y_pred_tr, y_pred):
+687fig_1 = plt.figure(figsize = (16,12))
+688ax_tr_true = fig_1.add_subplot(2,2,1)
+689ax_tr_pred = fig_1.add_subplot(2,2,3)
+690ax_test_true = fig_1.add_subplot(2,2,2)
+691ax_test_pred = fig_1.add_subplot(2,2,4)
+21
+
+692show_clf_result_single_run(y_true=y_tr, y_pred=y_pred_tr, ax_tr=ax_tr_true, ax_pred=ax_tr_pred, suffix='training')
+693show_clf_result_single_run(y_true=y_test, y_pred=y_pred, ax_tr=ax_test_true, ax_pred=ax_test_pred, suffix='testing')
+694plt.show()
+695
+696
+697def show_clf_result_single_run(y_true, y_pred, ax_tr, ax_pred, suffix='training'):
+698ax_tr.set_xlabel('index of data point', fontsize = 15)
+699ax_tr.set_ylabel('y', fontsize = 15)
+700ax_tr.set_title(f'{suffix}: Truth', fontsize = 20)
+701ax_tr.plot(range(len(y_true)), y_true,'xb', label='Truth')
+702ax_tr.legend()
+703
+704ax_pred.set_xlabel('index of data points', fontsize = 15)
+705ax_pred.set_ylabel('y', fontsize = 15)
+706ax_pred.set_title(f'{suffix}: Prediction', fontsize = 20)
+707ax_pred.plot(range(len(y_pred)), y_pred,'ro', label='Prediction')
+708ax_pred.legend()
+709
+710acc, pre, recall, f1 = cal_classification_perf(y_true, y_pred)
+711print('\n New run:\n')
+712print(f'{suffix} performance, accuracy is:'+ str(acc))
+713print(f'{suffix} performance, precision is:'+ str(pre))
+714print(f'{suffix} performance, recall:'+ str(recall))
+715print(f'{suffix} performance, F1:'+ str(f1))
+716print('\n')
+717
+718
+719if __name__ =='__main__':
+720# Demo: pre-train a LinearRegression-based fault detector for motor 6
+721# and run it on two test sequences.
+722
+723import numpy as np
+724import pandas as pd
+725from sklearn.pipeline import Pipeline
+726from sklearn.preprocessing import StandardScaler
+727from sklearn.linear_model import LinearRegression
+728
+729
+730def remove_outliers(df: pd.DataFrame):
+731df['temperature'] = df['temperature'].where(df['temperature'] <= 100, np.nan)
+732df['temperature'] = df['temperature'].where(df['temperature'] >= 0, np.nan)
+733df['temperature'] = df['temperature'].ffill()
+734df['temperature'] = df['temperature'] - df['temperature'].iloc[0]
+735
+736df['voltage'] = df['voltage'].where(df['voltage'] >= 6000, np.nan)
+737df['voltage'] = df['voltage'].where(df['voltage'] <= 9000, np.nan)
+738df['voltage'] = df['voltage'].ffill()
+739df['voltage'] = df['voltage'] - df['voltage'].iloc[0]
+740
+741df['position'] = df['position'].where(df['position'] >= 0, np.nan)
+742df['position'] = df['position'].where(df['position'] <= 1000, np.nan)
+743df['position'] = df['position'].ffill()
+744df['position'] = df['position'] - df['position'].iloc[0]
+745
+746
+747base_dictionary ='C:/Users/Zhiguo/OneDrive -
+,→CentraleSupelec/Code/Python/digital_twin_robot/projects/maintenance_industry_4_2024/dataset/training_data/'
+748df_data = read_all_test_data_from_path(base_dictionary, remove_outliers, is_plot=False)
+749
+750normal_test_id = ['20240105_164214',
+751'20240105_165300',
+752'20240105_165972',
+753'20240320_152031',
+754'20240320_153841',
+755'20240320_155664',
+756'20240321_122650',
+757'20240325_135213',
+758'20240426_141190',
+759'20240426_141532',
+760'20240426_141602',
+761'20240426_141726',
+762'20240426_141938',
+763'20240426_141980',
+764'20240503_164435']
+765
+766df_tr = df_data[df_data['test_condition'].isin(normal_test_id)]
+767
+768feature_list_all = ['time','data_motor_1_position','data_motor_1_temperature','data_motor_1_voltage',
+769'data_motor_2_position','data_motor_2_temperature','data_motor_2_voltage',
+770'data_motor_3_position','data_motor_3_temperature','data_motor_3_voltage',
+771'data_motor_4_position','data_motor_4_temperature','data_motor_4_voltage',
+772'data_motor_5_position','data_motor_5_temperature','data_motor_5_voltage',
+773'data_motor_6_position','data_motor_6_temperature','data_motor_6_voltage']
+774
+775x_tr_org, y_temp_tr_org = extract_selected_feature(df_data=df_tr, feature_list=feature_list_all, motor_idx=6, mdl_type='reg')
+776
+777window_size = 10
+778sample_step = 1
+779prediction_lead_time = 1
+780threshold = .8
+781abnormal_limit = 3
+782
+783x_tr, y_temp_tr = prepare_sliding_window(df_x=x_tr_org, y=y_temp_tr_org, window_size=window_size, sample_step=sample_step,
+,→prediction_lead_time=prediction_lead_time, mdl_type='reg')
+784
+785steps = [
+786('standardizer', StandardScaler()),
+787('regressor', LinearRegression())
+788]
+789mdl_linear_regreession = Pipeline(steps)
+790mdl = mdl_linear_regreession.fit(x_tr, y_temp_tr)
+791
+22
+
+792test_id = [
+793'20240325_155003',
+794'20240425_093699',
+795]
+796df_test = df_data[df_data['test_condition'].isin(test_id)]
+797
+798detector_reg = FaultDetectReg(reg_mdl=mdl, threshold=threshold, abnormal_limit=abnormal_limit, window_size=window_size,
+,→sample_step=sample_step, pred_lead_time=prediction_lead_time)
+799
+800_, y_label_test_org = extract_selected_feature(df_data=df_test, feature_list=feature_list_all, motor_idx=6, mdl_type='clf')
+801x_test_org, y_temp_test_org = extract_selected_feature(df_data=df_test, feature_list=feature_list_all, motor_idx=6, mdl_type='reg')
+802
+803y_label_pred_tmp, y_temp_pred_tmp = detector_reg.predict(df_x_test=x_test_org, y_response_test=y_temp_test_org)
+804
+805_, y_label_test = prepare_sliding_window(df_x=x_test_org, y=y_label_test_org, sequence_name_list=test_id, window_size=window_size,
+,→sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type='clf')
+806_, y_temp_test_seq = prepare_sliding_window(df_x=x_test_org, y=y_temp_test_org, sequence_name_list=test_id, window_size=window_size,
+,→sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type='reg')
+807
+808show_reg_result(y_tr=y_temp_test_seq, y_test=y_temp_test_seq, y_pred_tr=y_temp_pred_tmp, y_pred=y_temp_pred_tmp,
+,→threshold=detector_reg.threshold)
+809show_clf_result(y_tr=y_label_test, y_test=y_label_test, y_pred_tr=y_label_pred_tmp, y_pred=y_label_pred_tmp)
+23

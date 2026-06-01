@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Redundant raw archive (data is already extracted under data/)
+data/raw_data_backup.zip
+
+# Local virtualenvs
+.venv/
+venv/
