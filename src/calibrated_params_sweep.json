@@ -1,0 +1,50 @@
+{
+  "1": {
+    "window": 400,
+    "k_high": 4.0,
+    "k_low": 1.0,
+    "min_rise": 0.5,
+    "min_run": 3,
+    "gap": 3
+  },
+  "2": {
+    "window": 400,
+    "k_high": 4.0,
+    "k_low": 1.0,
+    "min_rise": 0.5,
+    "min_run": 3,
+    "gap": 3
+  },
+  "3": {
+    "window": 400,
+    "k_high": 4.0,
+    "k_low": 1.0,
+    "min_rise": 0.5,
+    "min_run": 3,
+    "gap": 3
+  },
+  "4": {
+    "window": 400,
+    "k_high": 4.0,
+    "k_low": 1.0,
+    "min_rise": 0.5,
+    "min_run": 3,
+    "gap": 3
+  },
+  "5": {
+    "window": 400,
+    "k_high": 4.0,
+    "k_low": 1.0,
+    "min_rise": 0.5,
+    "min_run": 3,
+    "gap": 3
+  },
+  "6": {
+    "window": 300,
+    "k_high": 4.0,
+    "k_low": 1.0,
+    "min_rise": 0.5,
+    "min_run": 3,
+    "gap": 3
+  }
+}
