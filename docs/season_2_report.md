@@ -82,3 +82,89 @@ For an LLM or ML Engineer building the solution, the following steps are highly 
 3.  **Algorithm Selection:**
     * *Baseline:* XGBoost or LightGBM using sliding-window engineered features.
     * *Advanced:* 1D Convolutional Neural Networks (1D-CNN) or Long Short-Term Memory (LSTM) networks, which natively handle the sequential nature of the 10Hz time-series data.
+
+## 8. CALIBRATION CHANGELOG (imbalance-driven)
+
+The dominant difficulty is **sequence-level class imbalance**. After dropping the
+degenerate sequence `20240325_155003` (motors 2 & 4 labelled faulty for all 6652
+rows, with an inconsistent signature — it has no usable normal baseline, so it is
+excluded from calibration entirely), **motors 1–5 each have faults in only ONE
+usable training sequence** (`20240426_140055`); motor 6 has 5.
+
+### 8.1 Shared knobs + macro-F1 objective (`run_pipeline.py`)
+Per-motor knob tuning on a single fault sequence overfits (the local→Kaggle
+collapse). Mitigation, in `calibrate_group` / `_macro_grid`:
+* **Motors 1–5 calibrate jointly** (`CALIB_GROUPS`) with one *shared* knob set,
+  pooling 5 fault realisations instead of 1. Motor 6 keeps its own knobs.
+* Selection maximises **macro F1** (mean of per-motor F1), matching the Kaggle
+  metric. Pooled/micro F1 let the high-count motors dictate the threshold and
+  silently zeroed Motor 3 (subtle ~1 °C ramps); macro averaging prevents that.
+* Result on the real labelled faults: M1 0.93, M2 0.67, M3 0.81, M4 0.57,
+  M5 0.73, M6 0.52 → **mean 0.71**. (Lower than the old per-motor 0.81, which was
+  an overfit upper bound; this set is robust and motors 1–5 are no longer tuned
+  to a single sequence.) Motor 6 leave-one-fault-sequence-out CV ≈ 0.22.
+
+### 8.2 Synthetic augmentation — VALIDATED ON KAGGLE, ON by default (`augmentation.py`)
+The competition's failure-injection routine (briefing §9) was ported to Python to
+generate extra labelled faults in the fault-free sequences. This is
+distribution-consistent: the whole dataset — **including the hidden test labels** —
+is synthetic from the same routine, so the injected faults share the test set's
+generator. Peaks are sampled at +3–8 °C (the README's observed real range), added
+on top of the real noisy signal, over short spans.
+
+**Kaggle result: macro-F1 0.51 → 0.75** with augmentation on (peaks +3–8 °C).
+
+The decisive lesson is about *which local metric to trust*. There is only ONE real
+training fault sequence for motors 1–5 (`20240426_140055`), and it is subtle and
+unrepresentative — so per-motor F1 measured on it (0.48 augmented vs 0.71 without)
+**under-states** test performance and pointed the wrong way. The **synthetic CV-F1
+(~0.76) matched the Kaggle score (0.75) almost exactly**, because it is drawn from
+the test's own generator. We now optimise against the synthetic CV-F1, the first
+local metric on this project that tracks the leaderboard.
+
+Caveat: a single leaderboard point, and the no-augment shared+macro config (§8.1)
+has not itself been submitted, so the 0.51→0.75 gain is not yet attributed between
+calibration (§8.1) and augmentation (§8.2). Submitting `submission_noaugment.csv`
+would isolate it.
+
+### 8.3 Offline tuning against a held-out generator-matched eval (`src/sweep.py`)
+With a trustworthy local metric, knobs were tuned against a *held-out* synthetic
+eval set drawn from the true generator (peaks `randi[2,50]`, disjoint seeds from
+calibration). Findings:
+* Broadening the calibration peak range beyond +3-8C to the full +2-50C does not
+  change the chosen knobs but the optimum is robust.
+* The rolling-baseline **window optimum for motors 1-5 is 500, not 400** (400 was
+  the old grid edge); `src/window_test.py` confirms 500 beats 400/600/800/1000.
+  Offline 6-motor macro-F1 improves 0.86 -> 0.87 (mostly M2/M3). The grid in
+  `run_pipeline.py` was widened to include 500/600. Candidate `submission_w500.csv`
+  differs from the 0.75 file in only ~1% of rows (a few extra M3/M4 detections).
+* Note the offline eval (~0.86-0.87) sits above Kaggle (0.75): the synthetic eval
+  is somewhat optimistic (span/position assumptions), so offline gains transfer
+  only partially. Re-tuning the existing 6 knobs is essentially exhausted; the
+  weakest motors offline are M3 and M6 (~0.80), which a shape-matched filter
+  (the briefing's triangle) would target next.
+
+**Kaggle confirmation:** W=500 scored **0.79** (vs 0.75 at W=400). The window
+finding transferred to the leaderboard.
+
+### 8.4 Additional labelled data + real validation (`data/additional_data/`)
+The teacher supplied extra labelled training data (groups 1/6/7, 36 usable
+sequences, 15 with faults). It **largely dissolves the imbalance**: motors 1-5 now
+have 4-6 real fault sequences each (was 1) and M6 has 8. Loaded by
+`run_pipeline.load_tree` (walks the tree; the per-group spreadsheets are named
+inconsistently so we bypass them) and included by default (`--no-extra` to skip).
+
+This finally enables **real held-out validation** (`src/eval_real.py`): scoring
+knobs on the additional faults, which the calibration never saw.
+* The window trend holds on REAL data: mean per-motor F1 W400=0.22 < W500=0.28 <
+  W600=0.30; per-motor best windows run 500-800. So bigger window is robust, and
+  W=600 is worth a Kaggle try.
+* Reality check: the overfit ceiling on the additional faults is only ~0.38, far
+  below the synthetic offline (0.86). The additional groups are different
+  robots/conditions, so they are a much harder, more honest test. The Kaggle 0.79
+  is higher partly because of the F1=1.0 empty-motor rule and because the hidden
+  test resembles the original-robot distribution more than the other groups.
+
+Calibrating on the combined real data (original + additional) is the principled
+next step: it anchors the knobs on many real fault realisations per motor instead
+of one, which is the actual fix for the imbalance.

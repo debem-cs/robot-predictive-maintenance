@@ -55,45 +55,51 @@ def robust_baseline(r: np.ndarray, scale_floor: float = 0.5) -> tuple[float, flo
 
 # ---------------------------------------------------------------------------
 # Run-length post-processing
+#
+# These run on the *handful of runs* in a sequence (via vectorised run-length
+# encoding), not on every sample. Calibration calls them millions of times, so
+# scanning only the O(#runs) transitions - not O(n) in a Python loop - is what
+# keeps the grid search fast on hundreds of long sequences.
 # ---------------------------------------------------------------------------
+def _segments(mask: np.ndarray):
+    """Start / end (exclusive) indices of every contiguous True run in ``mask``.
+
+    Pads with False at both ends and reads transition positions, so a True run is
+    a (start, end) pair of consecutive transitions - no per-sample Python loop and
+    no int8/concatenate temporaries.
+    """
+    m = np.empty(mask.size + 2, dtype=bool)
+    m[0] = m[-1] = False
+    m[1:-1] = mask
+    t = np.flatnonzero(m[1:] != m[:-1])
+    return t[0::2], t[1::2]
+
+
 def bridge_gaps(flag: np.ndarray, gap: int) -> np.ndarray:
     """Fill holes of <= ``gap`` zeros sitting between two flagged regions."""
     if gap <= 0:
         return flag
-    flag = flag.copy()
-    n = len(flag)
-    i = 0
-    while i < n:
-        if flag[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and not flag[j]:
-            j += 1
-        if i > 0 and j < n and (j - i) <= gap:
-            flag[i:j] = True
-        i = j
-    return flag
+    flag = np.asarray(flag, dtype=bool)
+    n = flag.size
+    out = flag.copy()
+    starts, ends = _segments(~flag)  # the False runs (holes)
+    for a, b in zip(starts, ends):
+        if a > 0 and b < n and (b - a) <= gap:  # interior hole only
+            out[a:b] = True
+    return out
 
 
 def drop_short_runs(flag: np.ndarray, min_run: int) -> np.ndarray:
     """Remove flagged runs shorter than ``min_run`` (isolated noise spikes)."""
     if min_run <= 1:
         return flag
-    flag = flag.copy()
-    n = len(flag)
-    i = 0
-    while i < n:
-        if not flag[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and flag[j]:
-            j += 1
-        if (j - i) < min_run:
-            flag[i:j] = False
-        i = j
-    return flag
+    flag = np.asarray(flag, dtype=bool)
+    out = np.zeros_like(flag)
+    starts, ends = _segments(flag)
+    for a, b in zip(starts, ends):
+        if (b - a) >= min_run:
+            out[a:b] = True
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -110,43 +116,64 @@ def _grow_from_seeds(seed: np.ndarray, grow: np.ndarray) -> np.ndarray:
     reaches the high threshold is never flagged.
     """
     flag = np.zeros(len(seed), dtype=bool)
-    n = len(seed)
-    i = 0
-    while i < n:
-        if not grow[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and grow[j]:
-            j += 1
-        if seed[i:j].any():
-            flag[i:j] = True
-        i = j
+    starts, ends = _segments(np.asarray(grow, dtype=bool))
+    seed = np.asarray(seed, dtype=bool)
+    for a, b in zip(starts, ends):
+        if seed[a:b].any():
+            flag[a:b] = True
     return flag
 
 
-def detect_from_residual(residual: np.ndarray, k_high: float, k_low: float,
-                         min_rise: float, min_run: int, gap: int,
-                         scale_floor: float = 0.5) -> np.ndarray:
-    """Turn one sequence's residual into a 0/1 fault label array (hysteresis).
+def detect_from_scored(rise: np.ndarray, score: np.ndarray, k_high: float,
+                       k_low: float, min_rise: float, min_run: int,
+                       gap: int) -> np.ndarray:
+    """Hysteresis detection from PRECOMPUTED ``rise`` and ``score`` arrays.
 
-    A point *seeds* a fault when it is simultaneously > ``k_high`` robust-sigmas
-    AND > ``min_rise`` degrees above the sequence's normal residual level. The
-    seed then grows over neighbours that clear the gentler ``k_low`` / half
-    ``min_rise`` thresholds, after which run-length rules apply (drop runs shorter
-    than ``min_run``, bridge holes up to ``gap``). Set ``k_low == k_high`` for a
-    plain single-threshold detector. Signed (positive-only) by construction:
-    faults are temperature *rises*, so dips are never flagged.
+    ``rise = residual - med`` and ``score = rise / scale`` depend only on the
+    sequence + window, not on the thresholds - so the grid search computes them
+    once per (sequence, window) and this fast path only does comparisons plus the
+    vectorised run-length rules for each of the thousands of threshold combos.
     """
-    med, scale = robust_baseline(residual, scale_floor)
-    score = (residual - med) / scale
-    rise = residual - med
     seed = (score > k_high) & (rise > min_rise)
     grow = (score > k_low) & (rise > min_rise * 0.5)
     flag = _grow_from_seeds(seed, grow)
     flag = bridge_gaps(flag, gap)
     flag = drop_short_runs(flag, min_run)
     return flag.astype(int)
+
+
+def detect_from_residual(residual: np.ndarray, k_high: float, k_low: float,
+                         min_rise: float, min_run: int, gap: int,
+                         scale_floor: float = 0.5, baseline=None) -> np.ndarray:
+    """Turn one sequence's residual into a 0/1 fault label array (hysteresis).
+
+    A point *seeds* a fault when it is simultaneously > ``k_high`` robust-sigmas
+    AND > ``min_rise`` degrees above the sequence's normal residual level. The
+    seed grows over neighbours clearing the gentler ``k_low`` / half ``min_rise``
+    thresholds, then run-length rules apply. Set ``k_low == k_high`` for a plain
+    single-threshold detector. Signed (positive-only): faults are temperature
+    *rises*, so dips are never flagged. ``baseline`` may be a cached
+    ``(med, scale)`` pair to skip the repeated median work.
+    """
+    if baseline is None:
+        med, scale = robust_baseline(residual, scale_floor)
+    else:
+        med, scale = baseline
+    rise = residual - med
+    return detect_from_scored(rise, rise / scale, k_high, k_low, min_rise,
+                              min_run, gap)
+
+
+def prep_residual(temp: np.ndarray, window: int, scale_floor: float = 0.5):
+    """Precompute ``(rise, score)`` for a sequence at one window.
+
+    Cache this once per (sequence, window) and feed it to ``detect_from_scored``
+    for every threshold combo in a grid search - removing the per-combo median,
+    subtraction and division entirely."""
+    residual = detrend_residual(temp, window)
+    med, scale = robust_baseline(residual, scale_floor)
+    rise = residual - med
+    return rise, rise / scale
 
 
 # ---------------------------------------------------------------------------
